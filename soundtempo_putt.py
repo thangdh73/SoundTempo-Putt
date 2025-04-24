@@ -11,26 +11,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
-    .stSlider [data-baseweb="slider"] {
-        width: 95%;
-    }
-    .stAudio {
-        border-radius: 20px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-    .stButton>button {
-        background-color: #4CAF50;
-        color: white;
-        border-radius: 5px;
-        padding: 10px 24px;
-        margin: 10px 0;
-    }
-    .stMarkdown h1 {
-        color: #2e8b57;
-    }
+    .stSlider [data-baseweb="slider"] { width: 95%; }
+    .stAudio { border-radius: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+    .stButton>button { background-color: #4CAF50; color: white; border-radius: 5px; padding: 10px 24px; margin: 10px 0; }
+    .stMarkdown h1 { color: #2e8b57; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,9 +57,19 @@ class SoundTempoPuttGenerator:
         return chirp * envelope
 
     def generate_tone(self, duration, start_freq, end_freq, volume_envelope):
+        """Fixed method - removed incorrect assignment"""
         t = np.linspace(0, duration, int(self.sample_rate * duration), False)
         freq = start_freq + (end_freq - start_freq) * t/duration
         tone = np.sin(2 * pi * freq * t)
+        
+        # Ensure envelope matches tone length
+        if len(volume_envelope) != len(tone):
+            volume_envelope = np.interp(
+                np.linspace(0, 1, len(tone)),
+                np.linspace(0, 1, len(volume_envelope)),
+                volume_envelope
+            )
+            
         return tone * volume_envelope
 
     def generate_putt_audio(self, core_tempo_bpm, backswing_rhythm, distance_ft, 
@@ -80,23 +77,24 @@ class SoundTempoPuttGenerator:
         params = self.calculate_swing_parameters(
             core_tempo_bpm, backswing_rhythm, distance_ft, stimp, slope_percent)
         
+        # Generate envelope first to ensure proper lengths
+        backswing_env = np.concatenate([
+            np.linspace(0, 1, int(0.1 * params['backswing_time'] * self.sample_rate)),
+            np.ones(int(0.8 * params['backswing_time'] * self.sample_rate)),
+            np.linspace(1, 0, int(0.1 * params['backswing_time'] * self.sample_rate))
+        ])
+        
+        downswing_env = np.concatenate([
+            np.linspace(0, 1, int(0.1 * params['dsi_time'] * self.sample_rate)),
+            np.ones(int(0.7 * params['dsi_time'] * self.sample_rate)),
+            np.linspace(1, 0, int(0.2 * params['dsi_time'] * self.sample_rate))
+        ])
+        
         backswing_tone = self.generate_tone(
-            params['backswing_time'], 400, 600,
-            np.concatenate([
-                np.linspace(0, 1, int(0.1 * params['backswing_time'] * self.sample_rate)),
-                np.ones(int(0.8 * params['backswing_time'] * self.sample_rate)),
-                np.linspace(1, 0, int(0.1 * params['backswing_time'] * self.sample_rate))
-            ])
-        )
+            params['backswing_time'], 400, 600, backswing_env)
         
         downswing_tone = self.generate_tone(
-            params['dsi_time'], 600, 400,
-            np.concatenate([
-                np.linspace(0, 1, int(0.1 * params['dsi_time'] * self.sample_rate)),
-                np.ones(int(0.7 * params['dsi_time'] * self.sample_rate)),
-                np.linspace(1, 0, int(0.2 * params['dsi_time'] * self.sample_rate))
-            ])
-        )
+            params['dsi_time'], 600, 400, downswing_env)
         
         impact_chirp = self.generate_impact_chirp()
         backswing_beep = self.generate_tone(
@@ -128,8 +126,9 @@ class SoundTempoPuttGenerator:
         right_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp * 0.7
 
         max_amplitude = max(np.max(np.abs(left_channel)), np.max(np.abs(right_channel)))
-        left_channel /= max_amplitude
-        right_channel /= max_amplitude
+        if max_amplitude > 0:  # Prevent division by zero
+            left_channel /= max_amplitude
+            right_channel /= max_amplitude
 
         return left_channel, right_channel, params
 
@@ -150,67 +149,55 @@ class SoundTempoPuttGenerator:
 
 # Streamlit UI
 st.title("⛳ SoundTempo Putt Generator")
-st.markdown("""
-Create customized putting tones based on green conditions and stroke mechanics.  
-Adjust the sliders to match your putting scenario and generate audio feedback.
-""")
+st.markdown("Create customized putting tones based on green conditions and stroke mechanics.")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Stroke Parameters")
-    core_tempo = st.slider("Core Tempo (BPM)", 72, 130, 90, 
-                          help="Your natural downswing tempo (90bpm = 0.333s downswing)")
-    rhythm = st.slider("Backswing Rhythm Ratio", 1.7, 2.5, 2.0, 0.1,
-                      help="Backswing time relative to downswing (2.0 = twice as long)")
+    core_tempo = st.slider("Core Tempo (BPM)", 72, 130, 90)
+    rhythm = st.slider("Backswing Rhythm Ratio", 1.7, 2.5, 2.0, 0.1)
     handedness = st.radio("Handedness", ["Right", "Left"], index=0)
 
 with col2:
     st.subheader("Green Conditions")
     distance = st.slider("Distance (feet)", 1, 60, 15)
-    stimp = st.slider("Stimp Rating", 5.0, 16.0, 10.0, 0.5,
-                     help="Green speed (higher = faster)")
-    slope = st.slider("Slope (%)", -10.0, 10.0, 0.0, 0.5,
-                     help="Negative = downhill, Positive = uphill")
+    stimp = st.slider("Stimp Rating", 5.0, 16.0, 10.0, 0.5)
+    slope = st.slider("Slope (%)", -10.0, 10.0, 0.0, 0.5)
 
-# Generate audio
 if st.button("Generate Putting Tone", type="primary"):
     generator = SoundTempoPuttGenerator()
-    left, right, params = generator.generate_putt_audio(
-        core_tempo_bpm=core_tempo,
-        backswing_rhythm=rhythm,
-        distance_ft=distance,
-        stimp=stimp,
-        slope_percent=slope,
-        handedness=handedness.lower()
-    )
-    
-    # Display results
-    st.subheader("Stroke Analysis")
-    col3, col4 = st.columns(2)
-    with col3:
-        st.metric("Backswing Time", f"{params['backswing_time']:.3f} seconds")
-        st.metric("Downswing Time", f"{params['dsi_time']:.3f} seconds")
-    with col4:
-        st.metric("Backswing Length", f"{params['backswing_length_in']:.1f} inches")
-        st.metric("Required Impact Velocity", f"{params['required_velocity']:.2f} m/s")
-    
-    # Play audio
-    st.subheader("Audio Output")
-    audio_buffer = generator.save_as_mp3(left, right)
-    st.audio(audio_buffer, format="audio/mp3")
-    
-    # Download button
-    st.download_button(
-        label="Download MP3",
-        data=audio_buffer,
-        file_name=f"putt_{distance}ft_stimp{stimp}_slope{slope}%.mp3",
-        mime="audio/mp3"
-    )
+    try:
+        left, right, params = generator.generate_putt_audio(
+            core_tempo_bpm=core_tempo,
+            backswing_rhythm=rhythm,
+            distance_ft=distance,
+            stimp=stimp,
+            slope_percent=slope,
+            handedness=handedness.lower()
+        )
+        
+        st.subheader("Stroke Analysis")
+        col3, col4 = st.columns(2)
+        with col3:
+            st.metric("Backswing Time", f"{params['backswing_time']:.3f} seconds")
+            st.metric("Downswing Time", f"{params['dsi_time']:.3f} seconds")
+        with col4:
+            st.metric("Backswing Length", f"{params['backswing_length_in']:.1f} inches")
+            st.metric("Required Impact Velocity", f"{params['required_velocity']:.2f} m/s")
+        
+        st.subheader("Audio Output")
+        audio_buffer = generator.save_as_mp3(left, right)
+        st.audio(audio_buffer, format="audio/mp3")
+        
+        st.download_button(
+            label="Download MP3",
+            data=audio_buffer,
+            file_name=f"putt_{distance}ft_stimp{stimp}_slope{slope}%.mp3",
+            mime="audio/mp3"
+        )
+    except Exception as e:
+        st.error(f"Error generating audio: {str(e)}")
 
-# Footer
 st.markdown("---")
-st.caption("""
-Based on SoundTempo Putt™ technology - Golf training system for developing consistent putting rhythm.  
-*Note: For best results, use headphones to hear the stereo panning effects.*
-""")
+st.caption("Based on SoundTempo Putt™ technology - Use headphones for best stereo effects.")
