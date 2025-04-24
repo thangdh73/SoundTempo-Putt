@@ -77,40 +77,46 @@ class SoundTempoPuttGenerator:
         envelope = np.linspace(1, 0, len(t))
         return chirp * envelope
 
-    def generate_tone(self, duration, start_freq, end_freq, volume_envelope):
-        t = np.linspace(0, duration, int(self.sample_rate * duration), False)
+    def generate_tone(self, duration, start_freq, end_freq):
+        """Generate tone with proper length handling"""
+        samples = int(self.sample_rate * duration)
+        t = np.linspace(0, duration, samples, False)
         freq = start_freq + (end_freq - start_freq) * t/duration
         tone = np.sin(2 * pi * freq * t)
-        return tone * volume_envelope
+        
+        # Create envelope with same length
+        attack = int(0.1 * samples)
+        sustain = int(0.8 * samples)
+        release = samples - attack - sustain
+        envelope = np.concatenate([
+            np.linspace(0, 1, attack),
+            np.ones(sustain),
+            np.linspace(1, 0, release)
+        ])
+        
+        # Ensure lengths match
+        if len(envelope) != len(tone):
+            min_length = min(len(envelope), len(tone))
+            return tone[:min_length] * envelope[:min_length]
+        return tone * envelope
 
     def generate_putt_audio(self, core_tempo_bpm, backswing_rhythm, distance_ft, 
                           stimp=10, slope_percent=0, handedness='right'):
         params = self.calculate_swing_parameters(
             core_tempo_bpm, backswing_rhythm, distance_ft, stimp, slope_percent)
         
+        # Generate tones with consistent lengths
         backswing_tone = self.generate_tone(
-            params['backswing_time'], 400, 600,
-            np.concatenate([
-                np.linspace(0, 1, int(0.1 * params['backswing_time'] * self.sample_rate)),
-                np.ones(int(0.8 * params['backswing_time'] * self.sample_rate)),
-                np.linspace(1, 0, int(0.1 * params['backswing_time'] * self.sample_rate))
-            ])
-        )
+            params['backswing_time'], 400, 600)
         
         downswing_tone = self.generate_tone(
-            params['dsi_time'], 600, 400,
-            np.concatenate([
-                np.linspace(0, 1, int(0.1 * params['dsi_time'] * self.sample_rate)),
-                np.ones(int(0.7 * params['dsi_time'] * self.sample_rate)),
-                np.linspace(1, 0, int(0.2 * params['dsi_time'] * self.sample_rate))
-            ])
-        )
+            params['dsi_time'], 600, 400)
         
         impact_chirp = self.generate_impact_chirp()
         backswing_beep = self.generate_tone(
-            self.backswing_beep_duration, 1200, 1200, 
-            np.linspace(1, 0, int(self.sample_rate * self.backswing_beep_duration)))
+            self.backswing_beep_duration, 1200, 1200)
         
+        # Create stereo panning
         if handedness == 'right':
             pan_backswing = np.linspace(1, 0, len(backswing_tone))
             pan_downswing = np.linspace(0, 1, len(downswing_tone))
@@ -118,26 +124,31 @@ class SoundTempoPuttGenerator:
             pan_backswing = np.linspace(0, 1, len(backswing_tone))
             pan_downswing = np.linspace(1, 0, len(downswing_tone))
 
+        # Combine channels with length checking
+        min_length = min(len(backswing_tone), len(downswing_tone))
         left_channel = np.concatenate([
-            backswing_tone * pan_backswing,
-            downswing_tone * pan_downswing
+            backswing_tone[:min_length] * pan_backswing[:min_length],
+            downswing_tone[:min_length] * pan_downswing[:min_length]
         ])
         right_channel = np.concatenate([
-            backswing_tone * (1 - pan_backswing),
-            downswing_tone * (1 - pan_downswing)
+            backswing_tone[:min_length] * (1 - pan_backswing[:min_length]),
+            downswing_tone[:min_length] * (1 - pan_downswing[:min_length])
         ])
 
-        beep_pos = int(0.9 * len(backswing_tone))
-        left_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep * 0.5
-        right_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep * 0.5
+        # Add audio cues with length checking
+        beep_pos = min(int(0.9 * len(backswing_tone)), len(left_channel) - len(backswing_beep))
+        left_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep[:len(left_channel)-beep_pos] * 0.5
+        right_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep[:len(right_channel)-beep_pos] * 0.5
 
-        impact_pos = len(backswing_tone)
-        left_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp * 0.7
-        right_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp * 0.7
+        impact_pos = min(len(backswing_tone), len(left_channel) - len(impact_chirp))
+        left_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp[:len(left_channel)-impact_pos] * 0.7
+        right_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp[:len(right_channel)-impact_pos] * 0.7
 
+        # Normalize
         max_amplitude = max(np.max(np.abs(left_channel)), np.max(np.abs(right_channel)))
-        left_channel /= max_amplitude
-        right_channel /= max_amplitude
+        if max_amplitude > 0:
+            left_channel /= max_amplitude
+            right_channel /= max_amplitude
 
         return left_channel, right_channel, params
 
@@ -214,8 +225,8 @@ if st.button("Generate Putting Tone", type="primary"):
                 mime="audio/mp3"
             )
         except Exception as e:
-            st.error(f"Audio export failed. FFmpeg may not be installed. Error: {str(e)}")
-            st.warning("Try running locally with FFmpeg installed or check Streamlit Cloud logs")
+            st.error(f"Audio export failed: {str(e)}")
+            st.info("Make sure FFmpeg is installed. On Streamlit Cloud, add 'ffmpeg' to packages.txt")
             
     except Exception as e:
         st.error(f"Generation failed: {str(e)}")
