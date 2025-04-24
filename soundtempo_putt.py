@@ -3,14 +3,29 @@ import numpy as np
 from math import sqrt, sin, pi
 import io
 import sys
+import os
 from pydub import AudioSegment
 
 # Check for FFmpeg
 try:
-    AudioSegment.ffmpeg = "/usr/bin/ffmpeg"  # Default Linux path
+    if sys.platform == "win32":
+        # Try common Windows FFmpeg paths
+        ffmpeg_paths = [
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+            "ffmpeg.exe"  # If it's in PATH
+        ]
+        for path in ffmpeg_paths:
+            if os.path.exists(path):
+                AudioSegment.converter = path
+                break
+    else:
+        AudioSegment.converter = "/usr/bin/ffmpeg"  # Default Linux path
+    
+    # Test FFmpeg
     test_sound = AudioSegment.silent(duration=100)
-except:
-    st.warning("FFmpeg not found - audio generation may not work")
+except Exception as e:
+    st.warning(f"FFmpeg check failed: {str(e)}. Audio may not work properly. Please ensure FFmpeg is installed and accessible.")
 
 # Set page config
 st.set_page_config(
@@ -43,8 +58,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 class SoundTempoPuttGenerator:
-    def __init__(self):
-        self.sample_rate = 44100
+    def __init__(self, sample_rate=44100):
+        self.sample_rate = sample_rate
+        self.audio_segments = []
         self.impact_chirp_duration = 0.05
         self.backswing_beep_duration = 0.05
         self.stimp_conversion = 0.3048 / 1.83
@@ -70,35 +86,80 @@ class SoundTempoPuttGenerator:
             'required_velocity': required_velocity
         }
 
+    def generate_tone(self, frequency, duration, volume=0.5):
+        """Generate a sine wave tone with proper sample alignment"""
+        try:
+            t = np.linspace(0, duration, int(duration * self.sample_rate), False)
+            samples = np.sin(2 * np.pi * frequency * t) * volume
+            samples = np.clip(samples, -1, 1)  # Ensure samples are within valid range
+            return samples
+        except Exception as e:
+            st.error(f"Error generating tone: {str(e)}")
+            return np.zeros(int(duration * self.sample_rate))
+            
+    def add_audio_cue(self, frequency, duration, volume=0.5):
+        """Add an audio cue with proper error handling"""
+        try:
+            samples = self.generate_tone(frequency, duration, volume)
+            # Convert to 16-bit PCM
+            samples = (samples * 32767).astype(np.int16)
+            # Create AudioSegment
+            audio_segment = AudioSegment(
+                samples.tobytes(),
+                frame_rate=self.sample_rate,
+                sample_width=2,
+                channels=1
+            )
+            self.audio_segments.append(audio_segment)
+        except Exception as e:
+            st.error(f"Error adding audio cue: {str(e)}")
+            
+    def generate_putting_sequence(self, distance, stimp, tempo=60):
+        """Generate a complete putting sequence with proper error handling"""
+        try:
+            # Calculate swing parameters
+            swing_time = self.calculate_swing_time(distance, stimp)
+            backswing_time = swing_time * 0.4
+            follow_through_time = swing_time * 0.6
+            
+            # Generate backswing beep
+            self.add_audio_cue(880, 0.1, 0.3)  # A5 note
+            
+            # Generate impact chirp
+            self.add_audio_cue(440, 0.05, 0.5)  # A4 note
+            
+            # Generate follow-through beep
+            self.add_audio_cue(220, 0.1, 0.2)  # A3 note
+            
+            # Combine all segments
+            if self.audio_segments:
+                final_audio = self.audio_segments[0]
+                for segment in self.audio_segments[1:]:
+                    final_audio = final_audio + segment
+                return final_audio
+            else:
+                return AudioSegment.silent(duration=1000)
+        except Exception as e:
+            st.error(f"Error generating putting sequence: {str(e)}")
+            return AudioSegment.silent(duration=1000)
+            
+    def save_audio(self, audio, filename):
+        """Save audio with proper error handling"""
+        try:
+            if isinstance(audio, AudioSegment):
+                audio.export(filename, format="mp3")
+                st.success(f"Audio saved successfully as {filename}")
+            else:
+                st.error("Invalid audio format")
+        except Exception as e:
+            st.error(f"Error saving audio: {str(e)}")
+
     def generate_impact_chirp(self):
         t = np.linspace(0, self.impact_chirp_duration, 
                        int(self.sample_rate * self.impact_chirp_duration), False)
         chirp = np.sin(2 * pi * (1000 + 2000 * t/self.impact_chirp_duration) * t)
         envelope = np.linspace(1, 0, len(t))
         return chirp * envelope
-
-    def generate_tone(self, duration, start_freq, end_freq):
-        """Generate tone with proper length handling"""
-        samples = int(self.sample_rate * duration)
-        t = np.linspace(0, duration, samples, False)
-        freq = start_freq + (end_freq - start_freq) * t/duration
-        tone = np.sin(2 * pi * freq * t)
-        
-        # Create envelope with same length
-        attack = int(0.1 * samples)
-        sustain = int(0.8 * samples)
-        release = samples - attack - sustain
-        envelope = np.concatenate([
-            np.linspace(0, 1, attack),
-            np.ones(sustain),
-            np.linspace(1, 0, release)
-        ])
-        
-        # Ensure lengths match
-        if len(envelope) != len(tone):
-            min_length = min(len(envelope), len(tone))
-            return tone[:min_length] * envelope[:min_length]
-        return tone * envelope
 
     def generate_putt_audio(self, core_tempo_bpm, backswing_rhythm, distance_ft, 
                           stimp=10, slope_percent=0, handedness='right'):
