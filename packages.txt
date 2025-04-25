@@ -1,3 +1,2 @@
 ffmpeg
-export ACCEPT_EULA=Y
-sudo DEBIAN_FRONTEND=noninteractive ACCEPT_EULA=Y apt-get install -y <package-name>
+sudo apt-get install -y -o Dpkg::Options::="--force-confold" --allow-downgrades <package-name>
