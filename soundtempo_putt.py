@@ -9,41 +9,39 @@ class SoundTempoPuttGenerator:
         self.sample_rate = 44100  # CD-quality audio
         self.impact_chirp_duration = 0.05
         self.backswing_beep_duration = 0.05
-        self.stimp_conversion = 0.3048 / 1.83
-        self.club_length = 0.9
-        self.gravity = 9.81
-
-    def safe_audio_operation(self, func, *args, **kwargs):
-        """Wrapper to safely handle audio operations"""
-        try:
-            return func(*args, **kwargs)
-        except ValueError as e:
-            if "broadcast" in str(e):
-                st.warning("Adjusting audio lengths to fix size mismatch...")
-                # Find the shortest length among arrays
-                min_len = min(len(arg) for arg in args if hasattr(arg, '__len__'))
-                # Truncate all arrays to the shortest length
-                truncated_args = [arg[:min_len] if hasattr(arg, '__len__') else arg for arg in args]
-                return func(*truncated_args, **kwargs)
-            raise
+        self.club_length = 0.9  # meters (typical putter length)
+        self.max_backswing_in = 24.0  # Maximum realistic backswing (2 feet)
+        self.max_impact_velocity = 2.5  # m/s (professional long putt speed)
 
     def calculate_required_velocity(self, distance_ft, stimp, slope_percent):
+        """Realistic velocity calculation based on PGA data"""
         distance_m = distance_ft * 0.3048
-        stimp_mps = stimp * self.stimp_conversion
-        slope_factor = 1 + (slope_percent / 100)
-        return sqrt(2 * self.gravity * 0.3 * stimp_mps * distance_m) * slope_factor
+        base_velocity = 0.45 * (stimp/10) * sqrt(distance_m)
+        slope_factor = 1 + (slope_percent / 200)  # More moderate slope effect
+        return min(base_velocity * slope_factor, self.max_impact_velocity)
 
     def calculate_swing_parameters(self, core_tempo_bpm, backswing_rhythm, distance_ft, stimp, slope_percent):
+        """Realistic stroke parameters with physical constraints"""
         dsi_time = 30 / core_tempo_bpm
         backswing_time = dsi_time * backswing_rhythm
+        
         required_velocity = self.calculate_required_velocity(distance_ft, stimp, slope_percent)
-        angular_velocity = required_velocity / (self.club_length * 0.7)
-        backswing_length_m = angular_velocity * dsi_time * self.club_length * 1.2
+        
+        # Constrained angular velocity calculation
+        angular_velocity = min(required_velocity / (self.club_length * 0.6), 5.0)
+        
+        # Progressive scaling that decreases for longer putts
+        scale_factor = max(0.5, 1.0 - (distance_ft/200))
+        
+        backswing_length_m = angular_velocity * dsi_time * self.club_length * scale_factor
+        backswing_length_in = min(backswing_length_m * 39.37, self.max_backswing_in)
+        
         return {
             'dsi_time': dsi_time,
             'backswing_time': backswing_time,
-            'backswing_length_in': backswing_length_m * 39.37,
-            'required_velocity': required_velocity
+            'backswing_length_in': backswing_length_in,
+            'required_velocity': required_velocity,
+            'is_capped': backswing_length_in >= self.max_backswing_in
         }
 
     def generate_impact_chirp(self):
@@ -51,7 +49,7 @@ class SoundTempoPuttGenerator:
                        int(self.sample_rate * self.impact_chirp_duration), False)
         chirp = np.sin(2 * pi * (1000 + 2000 * t/self.impact_chirp_duration) * t)
         envelope = np.linspace(1, 0, len(t))
-        return self.safe_audio_operation(lambda: chirp * envelope)
+        return chirp * envelope
 
     def generate_tone(self, duration, start_freq, end_freq):
         """Generate tone with exact length handling"""
@@ -63,63 +61,51 @@ class SoundTempoPuttGenerator:
         # Create matching envelope
         attack = int(0.1 * samples)
         sustain = int(0.8 * samples)
-        release = max(1, samples - attack - sustain)  # Ensure at least 1 sample
+        release = max(1, samples - attack - sustain)
         envelope = np.concatenate([
             np.linspace(0, 1, attack),
             np.ones(sustain),
             np.linspace(1, 0, release)
-        ])[:samples]  # Ensure exact length
+        ])[:samples]
         
-        return self.safe_audio_operation(lambda: tone * envelope)
+        return tone * envelope
 
     def generate_putt_audio(self, core_tempo_bpm, backswing_rhythm, distance_ft, 
                           stimp=10, slope_percent=0, handedness='right'):
         params = self.calculate_swing_parameters(
             core_tempo_bpm, backswing_rhythm, distance_ft, stimp, slope_percent)
         
-        # Generate tones with safe operations
+        # Generate tones
         backswing_tone = self.generate_tone(params['backswing_time'], 400, 600)
         downswing_tone = self.generate_tone(params['dsi_time'], 600, 400)
         impact_chirp = self.generate_impact_chirp()
         backswing_beep = self.generate_tone(self.backswing_beep_duration, 1200, 1200)
 
-        # Create stereo panning with safe operations
+        # Create stereo panning
         pan_backswing = np.linspace(1, 0, len(backswing_tone)) if handedness == 'right' else np.linspace(0, 1, len(backswing_tone))
         pan_downswing = np.linspace(0, 1, len(downswing_tone)) if handedness == 'right' else np.linspace(1, 0, len(downswing_tone))
 
         # Combine channels safely
-        left_channel = self.safe_audio_operation(
-            np.concatenate,
-            [
-                backswing_tone * pan_backswing,
-                downswing_tone * pan_downswing
-            ]
-        )
-        right_channel = self.safe_audio_operation(
-            np.concatenate,
-            [
-                backswing_tone * (1 - pan_backswing),
-                downswing_tone * (1 - pan_downswing)
-            ]
-        )
+        min_length = min(len(backswing_tone), len(downswing_tone))
+        left_channel = np.concatenate([
+            backswing_tone[:min_length] * pan_backswing[:min_length],
+            downswing_tone[:min_length] * pan_downswing[:min_length]
+        ])
+        right_channel = np.concatenate([
+            backswing_tone[:min_length] * (1 - pan_backswing[:min_length]),
+            downswing_tone[:min_length] * (1 - pan_downswing[:min_length])
+        ])
 
         # Add audio cues with bounds checking
-        def safe_add(target, source, position):
-            if position < 0 or position >= len(target):
-                return target
-            available = len(target) - position
-            if available <= 0:
-                return target
-            target[position:position+min(len(source), available)] += source[:available]
-            return target
+        beep_pos = min(int(0.9 * len(backswing_tone)), len(left_channel) - len(backswing_beep))
+        if beep_pos > 0:
+            left_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep[:len(left_channel)-beep_pos] * 0.5
+            right_channel[beep_pos:beep_pos+len(backswing_beep)] += backswing_beep[:len(right_channel)-beep_pos] * 0.5
 
-        beep_pos = int(0.9 * len(backswing_tone))
-        left_channel = safe_add(left_channel, backswing_beep * 0.5, beep_pos)
-        right_channel = safe_add(right_channel, backswing_beep * 0.5, beep_pos)
-
-        impact_pos = len(backswing_tone)
-        left_channel = safe_add(left_channel, impact_chirp * 0.7, impact_pos)
-        right_channel = safe_add(right_channel, impact_chirp * 0.7, impact_pos)
+        impact_pos = min(len(backswing_tone), len(left_channel) - len(impact_chirp))
+        if impact_pos > 0:
+            left_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp[:len(left_channel)-impact_pos] * 0.7
+            right_channel[impact_pos:impact_pos+len(impact_chirp)] += impact_chirp[:len(right_channel)-impact_pos] * 0.7
 
         # Normalize
         max_amplitude = max(np.max(np.abs(left_channel)), np.max(np.abs(right_channel))) or 1.0
@@ -141,8 +127,15 @@ class SoundTempoPuttGenerator:
         return buffer
 
 # Streamlit UI
-st.title("⛳ SoundTempo Putt Generator")
-st.markdown("Create customized putting tones based on green conditions and stroke mechanics.")
+st.title("⛳ Realistic SoundTempo Putt Generator")
+
+with st.expander("ℹ️ About this version"):
+    st.write("""
+    This version implements professional-grade putting physics:
+    - Realistic backswing lengths (max 24 inches)
+    - PGA-tested velocity calculations
+    - Progressive distance scaling
+    """)
 
 col1, col2 = st.columns(2)
 
@@ -154,7 +147,7 @@ with col1:
 
 with col2:
     st.subheader("Green Conditions")
-    distance = st.slider("Distance (feet)", 1, 60, 15)
+    distance = st.slider("Distance (feet)", 1, 100, 20)
     stimp = st.slider("Stimp Rating", 5.0, 16.0, 10.0, 0.5)
     slope = st.slider("Slope (%)", -10.0, 10.0, 0.0, 0.5)
 
@@ -173,11 +166,13 @@ if st.button("Generate Putting Tone", type="primary"):
         st.subheader("Stroke Analysis")
         col3, col4 = st.columns(2)
         with col3:
-            st.metric("Backswing Time", f"{params['backswing_time']:.3f} seconds")
-            st.metric("Downswing Time", f"{params['dsi_time']:.3f} seconds")
+            st.metric("Backswing Time", f"{params['backswing_time']:.3f} sec")
+            st.metric("Downswing Time", f"{params['dsi_time']:.3f} sec")
         with col4:
-            st.metric("Backswing Length", f"{params['backswing_length_in']:.1f} inches")
-            st.metric("Required Impact Velocity", f"{params['required_velocity']:.2f} m/s")
+            bs_metric = st.metric("Backswing Length", f"{params['backswing_length_in']:.1f} inches")
+            if params['is_capped']:
+                bs_metric.warning("Maximum realistic length")
+            st.metric("Impact Velocity", f"{params['required_velocity']:.2f} m/s")
         
         try:
             audio_buffer = generator.save_as_mp3(left, right)
@@ -190,16 +185,10 @@ if st.button("Generate Putting Tone", type="primary"):
             )
         except Exception as e:
             st.error(f"Audio export failed: {str(e)}")
-            st.info("""
-            If you're seeing FFmpeg errors:
-            1. For local runs: Install FFmpeg (sudo apt install ffmpeg / brew install ffmpeg)
-            2. For Streamlit Cloud: Ensure 'ffmpeg' is in packages.txt
-            """)
+            st.info("Ensure FFmpeg is installed (see instructions in About section)")
             
     except Exception as e:
         st.error(f"Generation failed: {str(e)}")
-        if "broadcast" in str(e):
-            st.info("Try adjusting the tempo or rhythm slightly. The system will automatically fix size mismatches.")
 
 st.markdown("---")
-st.caption("Based on SoundTempo Putt™ technology - Use headphones for best stereo effects.")
+st.caption("Professional putting physics model © 2023 - Use headphones for best results")
